@@ -94,13 +94,13 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
     input_ids = tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
     byte_input_ids = byte_tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
 
-    top_k = 20
+    top_k = 1
     top_p = 0.9
 
-    # torch.manual_seed(123)
-    # output = autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
-    # generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-    # color_print(f"large (target) model autoregressive_sampling: {generated_text}")
+    torch.manual_seed(123)
+    output = autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
+    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    color_print(f"large (target) model autoregressive_sampling: {generated_text}")
     
     # if use_benchmark:
     #     benchmark(autoregressive_sampling, "AS_large", use_profiling,

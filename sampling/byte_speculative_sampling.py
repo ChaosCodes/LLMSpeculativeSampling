@@ -53,30 +53,32 @@ def byte_speculative_sampling(prefix : torch.Tensor, byte_prefix: torch.Tensor,
         byte_prefix_len = byte_prefix.shape[1]
 
         x = approx_model_cache.generate(byte_prefix, gamma)
-        
         byte_drafted_x = x[:, byte_prefix_len:]
+
         draft_count += byte_drafted_x.shape[1] # maybe need to consider the maximun length of the output tokens
         
         # convert the byte prefix to token prefix
         draft_x = torch.cat([prefix, Decoder().encode(ByteDecoder().decode(byte_drafted_x), return_tensors='pt').to(device)], dim=1)
 
         _ = target_model_cache.generate(draft_x, 1)
-        
         draft_token_len = draft_x.shape[1] - prefix_len
 
+        # torch.multinomial(target_model_cache._prob_history[0,:,:], num_samples=1).squeeze(1)[None, :]
+        # sample the token from the last token of prefix
         selected_tokens = torch.multinomial(target_model_cache._prob_history[0,-draft_token_len-1:,:], num_samples=1).squeeze(1)[None, :] # sample(target_model_cache._prob_history)https://github.com/ChaosCodes/LLMSpeculativeSampling.git
         n_matches = ((~(draft_x[:, -draft_token_len:] == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()
-        
+
+        # Limit the generated tokens number to T
         if prefix_len + n_matches + 1 >= T:
             n_matches = T - prefix_len - 1
 
         # byte accepted prefix
         byte_prefix = ByteDecoder().encode(Decoder().decode(draft_x[:, :prefix_len + n_matches]), return_tensors='pt').to(device)
-         # byte resampled prefix
+        # byte resampled prefix
         resample_byte_token = ByteDecoder().encode(Decoder().decode(selected_tokens[:, n_matches]), return_tensors='pt').to(device)
-        
+
         approx_model_cache.rollback(byte_prefix.size()[1])
-        target_model_cache.rollback(prefix_len + n_matches + 1)
+        target_model_cache.rollback(prefix_len + n_matches)
     
         # heuristic adjust gamma
         accepted_byte_prefix_len = byte_prefix.shape[1] - byte_prefix_len
