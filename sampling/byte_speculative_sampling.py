@@ -58,12 +58,12 @@ def byte_speculative_sampling(prefix : torch.Tensor, byte_prefix: torch.Tensor,
         draft_count += byte_drafted_x.shape[1] # maybe need to consider the maximun length of the output tokens
         
         # convert the byte prefix to token prefix
-        draft_x = torch.cat([prefix, Decoder().encode(ByteDecoder().decode(byte_drafted_x), return_tensors='pt').to(device)], dim=1)
+        # remove the first token <s> at the begining of the sentence encoded by llama tokenizer
+        draft_x = torch.cat([prefix, Decoder().encode(ByteDecoder().decode(byte_drafted_x), return_tensors='pt').to(device)[:, 1:]], dim=1)
 
         _ = target_model_cache.generate(draft_x, 1)
         draft_token_len = draft_x.shape[1] - prefix_len
 
-        # torch.multinomial(target_model_cache._prob_history[0,:,:], num_samples=1).squeeze(1)[None, :]
         # sample the token from the last token of prefix
         selected_tokens = torch.multinomial(target_model_cache._prob_history[0,-draft_token_len-1:,:], num_samples=1).squeeze(1)[None, :] # sample(target_model_cache._prob_history)https://github.com/ChaosCodes/LLMSpeculativeSampling.git
         n_matches = ((~(draft_x[:, -draft_token_len:] == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()
@@ -73,11 +73,18 @@ def byte_speculative_sampling(prefix : torch.Tensor, byte_prefix: torch.Tensor,
             n_matches = T - prefix_len - 1
 
         # byte accepted prefix
-        byte_prefix = ByteDecoder().encode(Decoder().decode(draft_x[:, :prefix_len + n_matches]), return_tensors='pt').to(device)
+        # remove the last token </s> at the end of the sentence encoded by byte tokenizer
+        byte_prefix = ByteDecoder().encode(Decoder().decode(draft_x[:, :prefix_len + n_matches]), return_tensors='pt').to(device)[:, :-1]
         # byte resampled prefix
-        resample_byte_token = ByteDecoder().encode(Decoder().decode(selected_tokens[:, n_matches]), return_tensors='pt').to(device)
+        # remove the last token </s> at the end of the sentence encoded by byte tokenizer
+        resample_byte_token = ByteDecoder().encode(Decoder().decode(selected_tokens[:, n_matches]), return_tensors='pt').to(device)[:, :-1]
+        
+        # in case the resample byte token is empty, for example, token [29871] in llama tokenizer
+        if resample_byte_token.size(1) == 0:
+            approx_model_cache.rollback(byte_prefix.size()[1] - 1)
+        else:
+            approx_model_cache.rollback(byte_prefix.size()[1])
 
-        approx_model_cache.rollback(byte_prefix.size()[1])
         target_model_cache.rollback(prefix_len + n_matches)
     
         # heuristic adjust gamma

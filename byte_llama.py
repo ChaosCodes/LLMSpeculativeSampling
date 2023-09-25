@@ -92,7 +92,7 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
     print("finish loading models")
     
     input_ids = tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
-    byte_input_ids = byte_tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
+    byte_input_ids = byte_tokenizer.encode(input_text, return_tensors='pt').to(torch_device)[:,:-1]
 
     top_k = 1
     top_p = 0.9
