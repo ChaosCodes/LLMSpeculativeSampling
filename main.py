@@ -42,15 +42,14 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=40, ra
     # NOTE() approx_model_name and target_model_name should use the same tokenizer!
     
     torch_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
     tokenizer = AutoTokenizer.from_pretrained(approx_model_name, trust_remote_code=True)
     
     global DECODER
     DECODER = Decoder(tokenizer)
     
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
-    small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, trust_remote_code=True).to(torch_device)
-    large_model = AutoModelForCausalLM.from_pretrained(target_model_name, trust_remote_code=True).to(torch_device)
+    small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, trust_remote_code=True).half().to(torch_device)
+    large_model = AutoModelForCausalLM.from_pretrained(target_model_name, trust_remote_code=True).half().to(torch_device)
     print("finish loading models")
     
     input_ids = tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
@@ -92,8 +91,5 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=40, ra
 
 if __name__ == "__main__":
     args = parse_arguments()
-    
-    args.approx_model_name = MODELZOO["baichuan-7b"]
-    args.target_model_name = MODELZOO["baichuan-13b"]
-    
+
     generate(args.input, args.approx_model_name, args.target_model_name, random_seed = args.seed, verbose=args.verbose)
