@@ -57,8 +57,10 @@ def byte_speculative_sampling(prefix : torch.Tensor, byte_prefix: torch.Tensor,
         
         # convert the byte prefix to token prefix
         byte_drafted_x = x[:, byte_prefix_len:]
-        draft_x = torch.cat([prefix, Decoder().encode(ByteDecoder().decode(byte_drafted_x), return_tensors='pt').to(device)], dim=1)
-
+        # sentence piece tokenizer is anoyying...
+        draft_str = ByteDecoder().decode(byte_drafted_x)
+        if draft_str[0] == " ": draft_str = draft_str[1:]
+        draft_x = torch.cat([prefix, Decoder().encode(draft_str, return_tensors='pt').to(device)], dim=1)
         # check at which point draft_x and prefix are different
         
             
@@ -78,15 +80,12 @@ def byte_speculative_sampling(prefix : torch.Tensor, byte_prefix: torch.Tensor,
         print("--")
         print(n_matches)
         print(Decoder().decode(prefix))
-        print(ByteDecoder().decode(byte_prefix))
+        print(Decoder().decode(draft_x))
         # byte resampled prefix
         resample_byte_token = ByteDecoder().encode(Decoder().decode(torch.cat([prefix, selected_tokens], dim=1)[:,  :prefix_len + n_matches + 1]), return_tensors='pt').to(device)
-        if Decoder().decode(prefix) == """In May, Singapore athletes did the nation proud by hauling home 51 gold, 43 silver and 64 bronze medals from the Southeast Asia (Sea) Games in Cambodia.
-The Singapore Sports School (SSP) has also been a source of pride for the Republic. The school has produced a number of world-class athletes, including swimmer""" :
-            import pdb; pdb.set_trace()
+
         print(ByteDecoder().decode(resample_byte_token))
         resample_byte_token = resample_byte_token[:, byte_prefix.shape[1]:]
-        print(ByteDecoder().decode(resample_byte_token))
         approx_model_cache.rollback(byte_prefix.size()[1])
         target_model_cache.rollback(prefix_len + n_matches)
     
@@ -97,8 +96,6 @@ The Singapore Sports School (SSP) has also been a source of pride for the Republ
         # concat thee resample byte token
         byte_prefix = torch.cat((byte_prefix, resample_byte_token), dim=1)
         prefix = torch.cat((draft_x[:, :prefix_len + n_matches], selected_tokens[:, n_matches].unsqueeze(0)), dim=1)
-        print(Decoder().decode(prefix))
-        print(ByteDecoder().decode(byte_prefix))
         # heuristic adjust gamma
         # if accepted_byte_prefix_len >= gamma - 3:
         #     gamma += 8
