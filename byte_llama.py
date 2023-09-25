@@ -5,8 +5,8 @@ import contexttimer
 from colorama import Fore, Style
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from sampling import autoregressive_sampling, speculative_sampling, speculative_sampling_v2
-from globals import Decoder
+from sampling import autoregressive_sampling, byte_speculative_sampling, byte_speculative_sampling_v2
+from globals import Decoder, ByteDecoder
 
 
 
@@ -36,7 +36,7 @@ def parse_arguments():
     parser.add_argument('--seed', '-s', type=int, default=None, help='set a random seed, which can makes the result reproducible')
     parser.add_argument('--benchmark', '-b', action='store_true', default=False, help='show benchmark results.')
     parser.add_argument('--profiling', '-p', action='store_true', default=False, help='collect torch profiler results.')
-    parser.add_argument('--max_tokens', '-M', type=int, default=20, help='max token number generated.')
+    parser.add_argument('--max_tokens', '-M', type=int, default=50, help='max token number generated.')
     parser.add_argument('--gamma', '-g', type=int, default=4, help='guess time.')
     args = parser.parse_args()
     return args
@@ -68,13 +68,16 @@ def benchmark(fn, print_prefix, use_profiler=True, *args, **kwargs):
 
     print(f"\n [benchmark] {print_prefix}, tokens/sec: {len(output[0]) / t.elapsed / TEST_TIME}, {t.elapsed / TEST_TIME} sec generates {len(output[0])} tokens")
 
-def generate(input_text, approx_model_name, target_model_name, num_tokens=20, gamma = 4,
+def generate(input_text, approx_model_name, target_model_name, num_tokens=200, gamma = 4,
              random_seed = None, verbose = False, use_benchmark = False, use_profiling = False):
     # NOTE() approx_model_name and target_model_name should use the same tokenizer!
     
     torch_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    tokenizer = AutoTokenizer.from_pretrained(approx_model_name, trust_remote_code=True)
+    
+    byte_tokenizer = AutoTokenizer.from_pretrained(approx_model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(target_model_name, trust_remote_code=True,decode_with_prefix_space=True)
   
+    ByteDecoder().set_tokenizer(byte_tokenizer)
     Decoder().set_tokenizer(tokenizer)
     
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
@@ -88,9 +91,11 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
                                                        trust_remote_code=True)
     print("finish loading models")
     
-    input_ids = tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
+    
+    input_ids = tokenizer.encode(input_text, return_tensors='pt').to(torch_device)[:, 1:]
+    byte_input_ids = byte_tokenizer.encode(input_text, return_tensors='pt').to(torch_device)[:,:-1]
 
-    top_k = 20
+    top_k = 1
     top_p = 0.9
 
     torch.manual_seed(123)
@@ -98,32 +103,32 @@ def generate(input_text, approx_model_name, target_model_name, num_tokens=20, ga
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     color_print(f"large (target) model autoregressive_sampling: {generated_text}")
     
-    if use_benchmark:
-        benchmark(autoregressive_sampling, "AS_large", use_profiling,
-                  input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
+    # if use_benchmark:
+    #     benchmark(autoregressive_sampling, "AS_large", use_profiling,
+    #               input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
+
+    # torch.manual_seed(123)
+    # output = autoregressive_sampling(byte_input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
+    # generated_text = byte_tokenizer.decode(output[0], skip_special_tokens=True)
+    # color_print(f"Byte (approx) model autoregressive_sampling: {generated_text}")
+    
+    # if use_benchmark:
+    #     benchmark(autoregressive_sampling, "AS_small", use_profiling,
+    #               byte_input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
+    
+    # torch.manual_seed(123)
+    # output = speculative_sampling_v2(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed)
+    # generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    # color_print(f"deepmind's speculative_sampling: {generated_text}")   
 
     torch.manual_seed(123)
-    output = autoregressive_sampling(input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
+    output = byte_speculative_sampling(input_ids, byte_input_ids, small_model, large_model, num_tokens, gamma = gamma, \
+        top_k = top_k, top_p=top_p, random_seed = random_seed, verbose = verbose)
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-    color_print(f"small (approx) model autoregressive_sampling: {generated_text}")
-    
-    if use_benchmark:
-        benchmark(autoregressive_sampling, "AS_small", use_profiling,
-                  input_ids, small_model, num_tokens, top_k = top_k, top_p=top_p)
-    
-    torch.manual_seed(123)
-    output = speculative_sampling_v2(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed)
-    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-    color_print(f"deepmind's speculative_sampling: {generated_text}")   
-
-    torch.manual_seed(123)
-    output = speculative_sampling(input_ids, small_model, large_model, num_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed, verbose = verbose)
-    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-    color_print(f"google's speculative_sampling: {generated_text}")
-    
-    if use_benchmark:
-        benchmark(speculative_sampling, "SP", use_profiling,
-                  input_ids, small_model, large_model, max_len = num_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed)
+    color_print(f"bytellama's speculative_sampling: {generated_text}")
+    # if use_benchmark:
+    #     benchmark(speculative_sampling, "SP", use_profiling,
+    #               input_ids, small_model, large_model, max_len = num_tokens, gamma = gamma, top_k = top_k, top_p=top_p, random_seed = random_seed)
 
 if __name__ == "__main__":
     args = parse_arguments()

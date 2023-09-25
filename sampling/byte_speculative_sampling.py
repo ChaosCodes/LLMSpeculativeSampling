@@ -4,14 +4,16 @@ import torch
 
 from sampling.kvcache_model import KVCacheModel
 from sampling.utils import norm_logits, sample, max_fn
-from globals import Decoder
+from globals import Decoder, ByteDecoder
 
 @torch.no_grad()
-def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
-                         max_len : int , gamma : int = 4,
-                         temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None) -> torch.Tensor:
+def byte_speculative_sampling(prefix : torch.Tensor, byte_prefix: torch.Tensor,
+                              approx_model : torch.nn.Module, target_model : torch.nn.Module,
+                              max_len : int , gamma : int = 4,
+                              temperature : float = 1, top_k : int = 0, top_p : float = 0, 
+                              verbose : bool = True , random_seed : int = None) -> torch.Tensor:
     """
-    Google version Speculative Sampling.
+    huggingface version Speculative Sampling. (Assisted generation)
     https://arxiv.org/pdf/2211.17192.pdf
         
     Adapted with KV Cache Optimization.
@@ -31,8 +33,8 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     """
     seq_len = prefix.shape[1]
     T = seq_len + max_len
-    
     assert prefix.shape[0] == 1, "input batch size must be 1"
+    assert byte_prefix.shape[0] == 1, "input batch size must be 1"
 
     assert approx_model.device == target_model.device
     
@@ -40,71 +42,75 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     
     approx_model_cache = KVCacheModel(approx_model, temperature, top_k, top_p)
     target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
-    
-    resample_count = 0
-    target_sample_count = 0
+
+    byte_draft_count = 0
     accepted_count = 0
     
     while prefix.shape[1] < T:
         # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
         prefix_len = prefix.shape[1]
-
-        x = approx_model_cache.generate(prefix, gamma)
-        _ = target_model_cache.generate(x, 1)
-        
-        n = prefix_len + gamma - 1
+        byte_prefix_len = byte_prefix.shape[1]
+        x = approx_model_cache.generate(byte_prefix, gamma)
         
 
-        for i in range(gamma):
-            if random_seed:
-                torch.manual_seed(random_seed)
-            r = torch.rand(1, device = device)
-            j = x[:, prefix_len + i]
+        byte_draft_count += (x.shape[1] -  byte_prefix.shape[1]) # maybe need to consider the maximun length of the output tokens
+        
+        # convert the byte prefix to token prefix
+        byte_drafted_x = x[:, byte_prefix_len:]
+        draft_x = torch.cat([prefix, Decoder().encode(ByteDecoder().decode(byte_drafted_x), return_tensors='pt').to(device)], dim=1)
+
+        # check at which point draft_x and prefix are different
+        
             
-            if r > (target_model_cache._prob_history[:, prefix_len + i - 1, j]) / (approx_model_cache._prob_history[:, prefix_len + i - 1, j]):
-                # reject
-                n = prefix_len + i - 1
-                break
-            
-            if verbose:
-                print(f"approx guess accepted {j[0]}: \033[31m{Decoder().decode(torch.tensor([j]))}\033[0m")
+        _ = target_model_cache.generate(draft_x, 1)
+        draft_token_len = draft_x.shape[1] - prefix_len
 
-            accepted_count += 1
+        # torch.multinomial(target_model_cache._prob_history[0,:,:], num_samples=1).squeeze(1)[None, :]
+        # sample the token from the last token of prefix
+        selected_tokens = torch.multinomial(target_model_cache._prob_history[0,-draft_token_len-1:,:], num_samples=1).squeeze(1)[None, :] # sample(target_model_cache._prob_history)https://github.com/ChaosCodes/LLMSpeculativeSampling.git
+        n_matches = ((~(draft_x[:, -draft_token_len:] == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()
+        # Limit the generated tokens number to T
+        if prefix_len + n_matches + 1 >= T:
+            n_matches = T - prefix_len - 1
         
-        # print(f"n : {n}, i : {i}, prefix_len + gamma - 1: {prefix_len + gamma - 1}")
-        assert n >= prefix_len - 1, f"n {n}, prefix_len {prefix_len}"
-        prefix = x[:, :n + 1]
+        # byte accepted prefix
+        byte_prefix = ByteDecoder().encode(Decoder().decode(draft_x[:, :prefix_len + n_matches]), return_tensors='pt').to(device)
+        print("--")
+        print(n_matches)
+        print(Decoder().decode(prefix))
+        print(ByteDecoder().decode(byte_prefix))
+        # byte resampled prefix
+        resample_byte_token = ByteDecoder().encode(Decoder().decode(torch.cat([prefix, selected_tokens], dim=1)[:,  :prefix_len + n_matches + 1]), return_tensors='pt').to(device)
+        if Decoder().decode(prefix) == """In May, Singapore athletes did the nation proud by hauling home 51 gold, 43 silver and 64 bronze medals from the Southeast Asia (Sea) Games in Cambodia.
+The Singapore Sports School (SSP) has also been a source of pride for the Republic. The school has produced a number of world-class athletes, including swimmer""" :
+            import pdb; pdb.set_trace()
+        print(ByteDecoder().decode(resample_byte_token))
+        resample_byte_token = resample_byte_token[:, byte_prefix.shape[1]:]
+        print(ByteDecoder().decode(resample_byte_token))
+        approx_model_cache.rollback(byte_prefix.size()[1])
+        target_model_cache.rollback(prefix_len + n_matches)
+    
         
-        approx_model_cache.rollback(n+1)
-        
-        assert approx_model_cache._prob_history.shape[-2] <= n + 1, f"approx_model prob list shape {approx_model_cache._prob_history.shape}, n {n}"
-        
-        if n < prefix_len + gamma - 1:
-            # reject someone, sample from the pos n
-            t = sample(max_fn(target_model_cache._prob_history[:, n, :] - approx_model_cache._prob_history[:, n, :]))
-            if verbose:
-                print(f"target resamples at position {n}: \033[34m{Decoder().decode(t)}\033[0m")
-            resample_count += 1
-            target_model_cache.rollback(n+1)
-        else:
-            # all approx model decoding accepted
-            assert n == target_model_cache._prob_history.shape[1] - 1
-            t = sample(target_model_cache._prob_history[:, -1, :])
-            if verbose:
-                print(f"target samples {n}: \033[35m{Decoder().decode(t)}\033[0m")
-            target_sample_count += 1
-            target_model_cache.rollback(n+2)
-        
-        
-        prefix = torch.cat((prefix, t), dim=1)
+        accepted_byte_prefix_len = byte_prefix.shape[1] - byte_prefix_len
+        accepted_count += accepted_byte_prefix_len
+
+        # concat thee resample byte token
+        byte_prefix = torch.cat((byte_prefix, resample_byte_token), dim=1)
+        prefix = torch.cat((draft_x[:, :prefix_len + n_matches], selected_tokens[:, n_matches].unsqueeze(0)), dim=1)
+        print(Decoder().decode(prefix))
+        print(ByteDecoder().decode(byte_prefix))
+        # heuristic adjust gamma
+        # if accepted_byte_prefix_len >= gamma - 3:
+        #     gamma += 8
+        # else:
+        #     gamma = max(5, gamma - 1)
 
     if verbose:
-        print(f"generated tokens numbers {prefix.shape[-1] - seq_len}, accepted_count {accepted_count}, target_sample_count {target_sample_count}, resample_count {resample_count}")
+        print(f"generated tokens numbers {prefix.shape[-1] - seq_len}, accepted_count {accepted_count}, total_drafted_tokens {byte_draft_count}")
     return prefix
 
-
 @torch.no_grad()
-def speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
+def byte_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          max_len : int , gamma : int = 4,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, random_seed : int = None) -> torch.Tensor:
     """
